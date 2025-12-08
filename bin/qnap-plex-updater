@@ -132,16 +132,7 @@ fetch_checksum_from_api() {
                      head -1)
 
     if [[ -z "$checksum" ]]; then
-        prompt_security_warning "Could not fetch checksum from Plex API.
-The downloaded package cannot be verified for integrity.
-This could allow installation of corrupted or malicious packages.
-
-Possible causes:
-- Network connectivity issues
-- Plex API temporarily unavailable
-- Architecture '${arch}' not found in API response
-
-Proceeding without verification is a SECURITY RISK."
+        # Return error code without calling die/prompt (will be handled in main)
         return 1
     fi
 
@@ -269,7 +260,20 @@ main() {
     log "Downloading Plex Media Server ${REMOTE_PLEX_VERSION}-${AARCH}..."
 
     # Fetch expected checksum from Plex API
-    EXPECTED_CHECKSUM="$(fetch_checksum_from_api "${AARCH}")" || EXPECTED_CHECKSUM=""
+    if ! EXPECTED_CHECKSUM="$(fetch_checksum_from_api "${AARCH}")"; then
+        # Checksum fetch failed - prompt user for security decision
+        prompt_security_warning "Could not fetch checksum from Plex API.
+The downloaded package cannot be verified for integrity.
+This could allow installation of corrupted or malicious packages.
+
+Possible causes:
+- Network connectivity issues
+- Plex API temporarily unavailable
+- Architecture '${AARCH}' not found in API response
+
+Proceeding without verification is a SECURITY RISK."
+        EXPECTED_CHECKSUM=""
+    fi
 
     # Download package using secure curl options and HTTP header for token
     if ! /sbin/curl \
