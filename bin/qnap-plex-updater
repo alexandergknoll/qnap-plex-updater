@@ -135,12 +135,29 @@ fetch_checksum_from_api() {
         checksum_url="${checksum_url}?channel=plexpass"
     fi
 
+    # Debug output
+    log "DEBUG: Fetching checksum from API..."
+    log "  API URL: ${checksum_url}"
+    log "  Architecture: linux-${arch}"
+    log "  Version: ${version}"
+    log "  Channel: ${channel} (0=public, 1=beta)"
+
     # Fetch JSON with authentication headers (required for beta releases)
     # Using BusyBox-compatible grep and sed (no Perl regex -P flag)
-    local checksum=$(/sbin/curl "${CURL_SECURE_OPTS[@]}" \
-                     --header "X-Plex-Token: ${plex_token}" \
-                     --header "X-Plex-Client-Identifier: ${plex_client_id}" \
-                     "${checksum_url}" 2>/dev/null | \
+    local json_data=$(/sbin/curl "${CURL_SECURE_OPTS[@]}" \
+                      --header "X-Plex-Token: ${plex_token}" \
+                      --header "X-Plex-Client-Identifier: ${plex_client_id}" \
+                      "${checksum_url}" 2>/dev/null)
+
+    # Debug: Show matching releases
+    log "DEBUG: Matching QNAP releases:"
+    echo "$json_data" | /bin/grep "\"distro\":\"qnap\"" | /bin/grep "\"build\":\"linux-${arch}\"" | while read line; do
+        local rel_version=$(echo "$line" | sed -n 's/.*"url":"[^"]*\/\([0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+-[a-f0-9]\+\)\/.*/\1/p')
+        local rel_checksum=$(echo "$line" | sed -n 's/.*"checksum":"\([a-f0-9]\{40\}\)".*/\1/p')
+        log "  - Version: ${rel_version}, Checksum: ${rel_checksum}"
+    done
+
+    local checksum=$(echo "$json_data" | \
                      /bin/grep "\"distro\":\"qnap\"" | \
                      /bin/grep "\"build\":\"linux-${arch}\"" | \
                      /bin/grep "${version}" | \
@@ -148,10 +165,12 @@ fetch_checksum_from_api() {
                      head -1)
 
     if [[ -z "$checksum" ]]; then
+        log "DEBUG: No checksum found matching version ${version}"
         # Return error code without calling die/prompt (will be handled in main)
         return 1
     fi
 
+    log "DEBUG: Selected checksum: ${checksum}"
     echo "$checksum"
 }
 
