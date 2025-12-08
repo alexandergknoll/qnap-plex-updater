@@ -149,18 +149,20 @@ fetch_checksum_from_api() {
                       --header "X-Plex-Client-Identifier: ${plex_client_id}" \
                       "${checksum_url}" 2>/dev/null)
 
-    # Build the exact .qpkg filename to search for
-    # This uniquely identifies the release: PlexMediaServer-{version}-{arch}.qpkg
-    local qpkg_filename="PlexMediaServer-${version}-${arch}.qpkg"
+    # Build the exact URL path to search for - includes /qnap/ directory
+    # Format: /qnap/PlexMediaServer-{version}-{arch}.qpkg
+    local qnap_url_path="\/qnap\/PlexMediaServer-${version}-${arch}.qpkg"
 
-    log "DEBUG: Searching for exact filename: ${qpkg_filename}"
+    log "DEBUG: Searching for QNAP URL path: /qnap/PlexMediaServer-${version}-${arch}.qpkg"
 
-    # Search for the line containing this exact filename and extract its checksum
-    # This ensures we get the checksum from the correct QNAP release, not other NAS vendors
+    # Search for the line containing this exact URL path and extract its checksum
+    # Including /qnap/ ensures we only match QNAP releases, not other NAS vendors
     local checksum=$(echo "$json_data" | \
-                     /bin/grep "${qpkg_filename}" | \
+                     /bin/grep "${qnap_url_path}" | \
                      sed -n 's/.*"checksum":"\([a-f0-9]\{40\}\)".*/\1/p' | \
                      head -1)
+
+    log "DEBUG: Extracted checksum: ${checksum}"
 
     if [[ -z "$checksum" ]]; then
         log "DEBUG: No checksum found matching version ${version}"
