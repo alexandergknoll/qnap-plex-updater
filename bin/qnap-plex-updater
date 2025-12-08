@@ -150,8 +150,8 @@ validate_init_script() {
         die "Init script not found: $script_path"
     fi
 
-    # Check for invalid characters in path
-    if [[ ! "$script_path" =~ ^/[a-zA-Z0-9/_-]+$ ]]; then
+    # Check for invalid characters in path (allow dots for .qpkg and .sh)
+    if [[ ! "$script_path" =~ ^/[a-zA-Z0-9./_-]+$ ]]; then
         die "Init script path contains invalid characters: $script_path"
     fi
 
