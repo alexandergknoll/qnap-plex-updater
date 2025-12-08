@@ -136,20 +136,53 @@ fetch_checksum_from_api() {
     fi
 
     # Fetch JSON with authentication headers (required for beta releases)
-    # Using BusyBox-compatible grep and sed (no Perl regex -P flag)
-    local json_data=$(/sbin/curl "${CURL_SECURE_OPTS[@]}" \
+    local json_data
+    if ! json_data=$(/sbin/curl "${CURL_SECURE_OPTS[@]}" \
                       --header "X-Plex-Token: ${plex_token}" \
                       --header "X-Plex-Client-Identifier: ${plex_client_id}" \
-                      "${checksum_url}" 2>/dev/null)
+                      "${checksum_url}" 2>/dev/null); then
+        log "ERROR: Failed to fetch checksum data from Plex API (network error)"
+        return 1
+    fi
 
-    # For minified JSON (all on one line), we need to match the checksum that appears
-    # immediately after the URL field in the same JSON object
-    # Pattern: "url":"...qnap/PlexMediaServer-{version}-{arch}.qpkg","checksum":"XXXXX"
-    local checksum=$(echo "$json_data" | \
-                     sed -n 's/.*\/qnap\/PlexMediaServer-'"${version}"'-'"${arch}"'\.qpkg","checksum":"\([a-f0-9]\{40\}\)".*/\1/p')
+    # Check if JSON data was actually received
+    if [[ -z "$json_data" ]]; then
+        log "ERROR: Empty response from Plex API"
+        return 1
+    fi
 
+    # Try jq first if available (more robust JSON parsing)
+    local checksum=""
+    if command -v jq >/dev/null 2>&1; then
+        # Use jq for robust JSON parsing
+        checksum=$(echo "$json_data" | jq -r \
+            ".nas.QNAP.releases[] | select(.url | contains(\"PlexMediaServer-${version}-${arch}.qpkg\")) | .checksum" \
+            2>/dev/null | head -1)
+    fi
+
+    # Fallback to sed if jq is not available or failed
     if [[ -z "$checksum" ]]; then
-        # Return error code without calling die/prompt (will be handled in main)
+        # For minified JSON (all on one line), match the checksum that appears
+        # immediately after the URL field in the same JSON object
+        # Pattern: "url":"...qnap/PlexMediaServer-{version}-{arch}.qpkg","checksum":"XXXXX"
+        checksum=$(echo "$json_data" | \
+                   sed -n 's/.*\/qnap\/PlexMediaServer-'"${version}"'-'"${arch}"'\.qpkg","checksum":"\([a-f0-9]\{40\}\)".*/\1/p')
+    fi
+
+    # Validate checksum was extracted
+    if [[ -z "$checksum" ]]; then
+        log "ERROR: Could not extract checksum from Plex API response"
+        log "This may indicate:"
+        log "  - Architecture '${arch}' not available for version ${version}"
+        log "  - Plex API JSON format has changed"
+        log "  - Version ${version} not yet published to API"
+        return 1
+    fi
+
+    # Validate checksum format (should be 40 hexadecimal characters for SHA-1)
+    if [[ ! "$checksum" =~ ^[a-f0-9]{40}$ ]]; then
+        log "ERROR: Invalid checksum format extracted: '$checksum'"
+        log "Expected 40 hexadecimal characters (SHA-1 hash)"
         return 1
     fi
 
@@ -190,10 +223,16 @@ ABORTING INSTALLATION FOR SECURITY."
 
 validate_init_script() {
     local script_path=$1
+    local original_path="$script_path"
 
     # Check if file exists
     if [[ ! -f "$script_path" ]]; then
         die "Init script not found: $script_path"
+    fi
+
+    # Check for path traversal attempts (.. sequences)
+    if [[ "$script_path" =~ \.\. ]]; then
+        die "Init script path contains path traversal sequences (..): $script_path"
     fi
 
     # Check for invalid characters in path (allow dots for .qpkg and .sh)
@@ -208,6 +247,20 @@ validate_init_script() {
         script_path="$(readlink -f "$script_path" 2>/dev/null)" || script_path="$script_path"
     fi
     # If neither command is available, continue with original path
+
+    # After resolving symlinks, check again for path traversal in resolved path
+    if [[ "$script_path" =~ \.\. ]]; then
+        die "Init script resolved path contains path traversal sequences: $original_path -> $script_path"
+    fi
+
+    # Verify resolved path is absolute and doesn't escape to sensitive directories
+    # Block access to system directories that should never contain Plex init scripts
+    if [[ "$script_path" =~ ^/etc/passwd ]] || \
+       [[ "$script_path" =~ ^/etc/shadow ]] || \
+       [[ "$script_path" =~ ^/root/.ssh ]] || \
+       [[ "$script_path" =~ ^/etc/ssh ]]; then
+        die "Init script path points to sensitive system file (potential path traversal): $original_path -> $script_path"
+    fi
 
     # Verify script is owned by root (UID 0)
     local owner_uid=$(stat -c '%u' "$script_path" 2>/dev/null)
@@ -233,18 +286,63 @@ main() {
     PLEX_DIR="$(parse_config_file "$QPKG_CONF" "$QPKG_NAME" Install_path)"
     PLEX_INIT_SCRIPT="$(parse_config_file "$QPKG_CONF" "$QPKG_NAME" Shell)"
 
+    # Validate PLEX_DIR was successfully extracted
+    if [[ -z "$PLEX_DIR" ]]; then
+        die "Failed to determine Plex installation directory from $QPKG_CONF
+Plex Media Server may not be installed or the configuration is corrupted."
+    fi
+
+    # Validate PLEX_DIR exists and is accessible
+    if [[ ! -d "$PLEX_DIR" ]]; then
+        die "Plex installation directory does not exist: $PLEX_DIR
+Plex Media Server may not be properly installed."
+    fi
+
+    # Validate PLEX_DIR is readable
+    if [[ ! -r "$PLEX_DIR" ]]; then
+        die "Cannot access Plex installation directory: $PLEX_DIR
+Check directory permissions."
+    fi
+
     # Validate init script path before use
     PLEX_INIT_SCRIPT="$(validate_init_script "$PLEX_INIT_SCRIPT")"
 
-    PLEX_TOKEN="$(/bin/grep PlexOnlineToken "${PLEX_DIR}"/Library/Plex\ Media\ Server/Preferences.xml \
+    # Validate Preferences.xml exists before attempting to read
+    PLEX_PREFS="${PLEX_DIR}/Library/Plex Media Server/Preferences.xml"
+    if [[ ! -f "$PLEX_PREFS" ]]; then
+        die "Plex Preferences.xml not found at: $PLEX_PREFS
+This usually means Plex Media Server has not been configured yet.
+Please start Plex and complete initial setup before running this updater."
+    fi
+
+    # Validate Preferences.xml is readable
+    if [[ ! -r "$PLEX_PREFS" ]]; then
+        die "Cannot read Plex Preferences.xml at: $PLEX_PREFS
+Check file permissions."
+    fi
+
+    PLEX_TOKEN="$(/bin/grep PlexOnlineToken "$PLEX_PREFS" \
                   | sed -e 's/.*PlexOnlineToken=\"//' -e 's/\".*//')"
-    PLEX_CLIENT_ID="$(/bin/grep ProcessedMachineIdentifier "${PLEX_DIR}"/Library/Plex\ Media\ Server/Preferences.xml \
+    PLEX_CLIENT_ID="$(/bin/grep ProcessedMachineIdentifier "$PLEX_PREFS" \
                        | sed -e 's/.*ProcessedMachineIdentifier=\"//' -e 's/\".*//')"
 
     # Fallback to MachineIdentifier if ProcessedMachineIdentifier not found
     if [[ -z "$PLEX_CLIENT_ID" ]]; then
-        PLEX_CLIENT_ID="$(/bin/grep MachineIdentifier "${PLEX_DIR}"/Library/Plex\ Media\ Server/Preferences.xml \
+        PLEX_CLIENT_ID="$(/bin/grep MachineIdentifier "$PLEX_PREFS" \
                            | sed -e 's/.*MachineIdentifier=\"//' -e 's/\".*//' | head -1)"
+    fi
+
+    # Validate required authentication tokens were extracted successfully
+    if [[ -z "$PLEX_TOKEN" ]]; then
+        die "Failed to extract PlexOnlineToken from Preferences.xml.
+The Preferences.xml file may be malformed or Plex may not be authenticated.
+Please ensure Plex Media Server is properly configured and authenticated."
+    fi
+
+    if [[ -z "$PLEX_CLIENT_ID" ]]; then
+        die "Failed to extract MachineIdentifier from Preferences.xml.
+The Preferences.xml file may be malformed.
+Please ensure Plex Media Server is properly configured."
     fi
     # Don't exit if LOCAL_PLEX_VERSION is empty, i.e PMS is not installed or simply not running.
     LOCAL_PLEX_VERSION="$(/sbin/curl \
@@ -262,14 +360,30 @@ main() {
     fi
 
     # Use HTTP header for token to prevent exposure in process lists
-    REMOTE_PLEX_VERSION="$(/sbin/curl \
+    # Use if/then for proper error handling
+    if ! REMOTE_PLEX_VERSION="$(/sbin/curl \
                            "${CURL_SECURE_OPTS[@]}" \
                            --location \
                            --head \
                            --write-out '%{url_effective}' \
                            --header "X-Plex-Token: ${PLEX_TOKEN}" \
                            "https://plex.tv/downloads/latest/5?channel=${CHANNEL}&build=linux-${AARCH}&distro=qnap" \
-                           2>/dev/null | /usr/bin/tail -n1 | /bin/grep -ioE "${REGEX_PLEX_VERSION}" | /bin/uniq)"
+                           2>/dev/null | /usr/bin/tail -n1 | /bin/grep -ioE "${REGEX_PLEX_VERSION}" | /bin/uniq)"; then
+        die "Failed to fetch latest Plex version from plex.tv
+This could indicate:
+  - Network connectivity issues
+  - Invalid Plex authentication token
+  - Plex.tv API temporarily unavailable"
+    fi
+
+    # Validate that we actually got a version string
+    if [[ -z "$REMOTE_PLEX_VERSION" ]]; then
+        die "Could not determine latest Plex version from plex.tv
+This could indicate:
+  - Architecture '${AARCH}' not supported
+  - Invalid API response format
+  - Version regex pattern mismatch"
+    fi
 
     # If PMS is not installed or simply not running, just fetch and install the latest version available.
     # Do nothing and exit if latest version is already installed.
