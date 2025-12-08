@@ -125,12 +125,22 @@ To proceed, run this script manually and confirm the security warning."
 fetch_checksum_from_api() {
     local arch=$1
     local version=$2
-    local checksum_url="https://plex.tv/api/downloads/5.json"
+    local channel=$3
+    local plex_token=$4
+    local plex_client_id=$5
 
-    # Fetch JSON and extract checksum for matching QNAP architecture AND version
-    # This ensures we get the correct checksum for the specific channel (public/beta)
+    # Add ?channel=plexpass for beta/Plex Pass releases
+    local checksum_url="https://plex.tv/api/downloads/5.json"
+    if [[ "$channel" == "1" ]]; then
+        checksum_url="${checksum_url}?channel=plexpass"
+    fi
+
+    # Fetch JSON with authentication headers (required for beta releases)
     # Using BusyBox-compatible grep and sed (no Perl regex -P flag)
-    local checksum=$(/sbin/curl "${CURL_SECURE_OPTS[@]}" "${checksum_url}" 2>/dev/null | \
+    local checksum=$(/sbin/curl "${CURL_SECURE_OPTS[@]}" \
+                     --header "X-Plex-Token: ${plex_token}" \
+                     --header "X-Plex-Client-Identifier: ${plex_client_id}" \
+                     "${checksum_url}" 2>/dev/null | \
                      /bin/grep "\"distro\":\"qnap\"" | \
                      /bin/grep "\"build\":\"linux-${arch}\"" | \
                      /bin/grep "${version}" | \
@@ -227,11 +237,28 @@ main() {
 
     PLEX_TOKEN="$(/bin/grep PlexOnlineToken "${PLEX_DIR}"/Library/Plex\ Media\ Server/Preferences.xml \
                   | sed -e 's/.*PlexOnlineToken=\"//' -e 's/\".*//')"
+    PLEX_CLIENT_ID="$(/bin/grep ProcessedMachineIdentifier "${PLEX_DIR}"/Library/Plex\ Media\ Server/Preferences.xml \
+                       | sed -e 's/.*ProcessedMachineIdentifier=\"//' -e 's/\".*//')"
+
+    # Fallback to MachineIdentifier if ProcessedMachineIdentifier not found
+    if [[ -z "$PLEX_CLIENT_ID" ]]; then
+        PLEX_CLIENT_ID="$(/bin/grep MachineIdentifier "${PLEX_DIR}"/Library/Plex\ Media\ Server/Preferences.xml \
+                           | sed -e 's/.*MachineIdentifier=\"//' -e 's/\".*//' | head -1)"
+    fi
     # Don't exit if LOCAL_PLEX_VERSION is empty, i.e PMS is not installed or simply not running.
     LOCAL_PLEX_VERSION="$(/sbin/curl \
                           --silent \
                           http://localhost:32400/identity \
                           | /bin/grep -ioE "${REGEX_PLEX_VERSION}")" || true
+
+    # Convert channel name to numeric value (needed for download URL and API)
+    if [[ "${CHANNEL}" == "public" ]]; then
+        CHANNEL=0
+    elif [[ "${CHANNEL}" == "beta" ]]; then
+        CHANNEL=1
+    else
+        die "'channel' can only be one of 'public' or 'beta', exiting..."
+    fi
 
     # Use HTTP header for token to prevent exposure in process lists
     REMOTE_PLEX_VERSION="$(/sbin/curl \
@@ -242,14 +269,6 @@ main() {
                            --header "X-Plex-Token: ${PLEX_TOKEN}" \
                            "https://plex.tv/downloads/latest/5?channel=${CHANNEL}&build=linux-${AARCH}&distro=qnap" \
                            2>/dev/null | /usr/bin/tail -n1 | /bin/grep -ioE "${REGEX_PLEX_VERSION}" | /bin/uniq)"
-
-    if [[ "${CHANNEL}" == "public" ]]; then
-        CHANNEL=0
-    elif [[ "${CHANNEL}" == "beta" ]]; then
-        CHANNEL=1
-    else
-        die "'channel' can only be one of 'public' or 'beta', exiting..."
-    fi
 
     # If PMS is not installed or simply not running, just fetch and install the latest version available.
     # Do nothing and exit if latest version is already installed.
@@ -265,8 +284,8 @@ main() {
 
     log "Downloading Plex Media Server ${REMOTE_PLEX_VERSION}-${AARCH}..."
 
-    # Fetch expected checksum from Plex API (pass version to match correct channel)
-    if ! EXPECTED_CHECKSUM="$(fetch_checksum_from_api "${AARCH}" "${REMOTE_PLEX_VERSION}")"; then
+    # Fetch expected checksum from Plex API with authentication for beta/plexpass releases
+    if ! EXPECTED_CHECKSUM="$(fetch_checksum_from_api "${AARCH}" "${REMOTE_PLEX_VERSION}" "${CHANNEL}" "${PLEX_TOKEN}" "${PLEX_CLIENT_ID}")"; then
         # Checksum fetch failed - prompt user for security decision
         prompt_security_warning "Could not fetch checksum from Plex API.
 The downloaded package cannot be verified for integrity.
