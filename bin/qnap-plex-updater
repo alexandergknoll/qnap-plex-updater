@@ -124,13 +124,16 @@ To proceed, run this script manually and confirm the security warning."
 
 fetch_checksum_from_api() {
     local arch=$1
+    local version=$2
     local checksum_url="https://plex.tv/api/downloads/5.json"
 
-    # Fetch JSON and extract checksum for matching QNAP architecture
+    # Fetch JSON and extract checksum for matching QNAP architecture AND version
+    # This ensures we get the correct checksum for the specific channel (public/beta)
     # Using BusyBox-compatible grep and sed (no Perl regex -P flag)
     local checksum=$(/sbin/curl "${CURL_SECURE_OPTS[@]}" "${checksum_url}" 2>/dev/null | \
                      /bin/grep "\"distro\":\"qnap\"" | \
                      /bin/grep "\"build\":\"linux-${arch}\"" | \
+                     /bin/grep "${version}" | \
                      sed -n 's/.*"checksum":"\([a-f0-9]\{40\}\)".*/\1/p' | \
                      head -1)
 
@@ -262,8 +265,8 @@ main() {
 
     log "Downloading Plex Media Server ${REMOTE_PLEX_VERSION}-${AARCH}..."
 
-    # Fetch expected checksum from Plex API
-    if ! EXPECTED_CHECKSUM="$(fetch_checksum_from_api "${AARCH}")"; then
+    # Fetch expected checksum from Plex API (pass version to match correct channel)
+    if ! EXPECTED_CHECKSUM="$(fetch_checksum_from_api "${AARCH}" "${REMOTE_PLEX_VERSION}")"; then
         # Checksum fetch failed - prompt user for security decision
         prompt_security_warning "Could not fetch checksum from Plex API.
 The downloaded package cannot be verified for integrity.
