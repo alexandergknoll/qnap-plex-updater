@@ -155,8 +155,13 @@ validate_init_script() {
         die "Init script path contains invalid characters: $script_path"
     fi
 
-    # Resolve symlinks to prevent symlink attacks
-    script_path="$(realpath "$script_path" 2>/dev/null)" || die "Failed to resolve init script path"
+    # Resolve symlinks to prevent symlink attacks (try multiple methods for portability)
+    if command -v realpath >/dev/null 2>&1; then
+        script_path="$(realpath "$script_path" 2>/dev/null)" || script_path="$script_path"
+    elif command -v readlink >/dev/null 2>&1; then
+        script_path="$(readlink -f "$script_path" 2>/dev/null)" || script_path="$script_path"
+    fi
+    # If neither command is available, continue with original path
 
     # Verify script is owned by root (UID 0)
     local owner_uid=$(stat -c '%u' "$script_path" 2>/dev/null)
