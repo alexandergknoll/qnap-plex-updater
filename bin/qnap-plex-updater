@@ -127,8 +127,11 @@ fetch_checksum_from_api() {
     local checksum_url="https://plex.tv/api/downloads/5.json"
 
     # Fetch JSON and extract checksum for matching QNAP architecture
+    # Using BusyBox-compatible grep and sed (no Perl regex -P flag)
     local checksum=$(/sbin/curl "${CURL_SECURE_OPTS[@]}" "${checksum_url}" 2>/dev/null | \
-                     /bin/grep -oP "\"distro\":\"qnap\",\"url\":\"[^\"]+${arch}\.qpkg\",\"checksum\":\"\\K[a-f0-9]{40}" | \
+                     /bin/grep "\"distro\":\"qnap\"" | \
+                     /bin/grep "\"build\":\"linux-${arch}\"" | \
+                     sed -n 's/.*"checksum":"\([a-f0-9]\{40\}\)".*/\1/p' | \
                      head -1)
 
     if [[ -z "$checksum" ]]; then
