@@ -1,9 +1,21 @@
 #!/usr/bin/env bash
 
 readonly PROJECT=qnap-plex-updater
-readonly VERSION=1.0.1
+readonly VERSION=1.1.0
 
 set -euo pipefail
+
+#Security: Curl options for enhanced TLS validation
+readonly CURL_SECURE_OPTS=(
+    --fail                    # Fail on HTTP errors
+    --show-error             # Show errors even in silent mode
+    --silent                 # Hide progress
+    --proto '=https'         # Only allow HTTPS
+    --tlsv1.2                # Minimum TLS 1.2
+    --max-redirs 3           # Limit redirect chains
+    --connect-timeout 30     # Connection timeout
+    --max-time 300           # Maximum time for operation
+)
 
 usage() {
     version
@@ -88,13 +100,91 @@ parse_config_file() {
     /sbin/getcfg -f "${file}" "${object}" "${key}"
 }
 
+fetch_checksum_from_api() {
+    local arch=$1
+    local checksum_url="https://plex.tv/api/downloads/5.json"
+
+    # Fetch JSON and extract checksum for matching QNAP architecture
+    local checksum=$(/sbin/curl "${CURL_SECURE_OPTS[@]}" "${checksum_url}" 2>/dev/null | \
+                     /bin/grep -oP "\"distro\":\"qnap\",\"url\":\"[^\"]+${arch}\.qpkg\",\"checksum\":\"\\K[a-f0-9]{40}" | \
+                     head -1)
+
+    if [[ -z "$checksum" ]]; then
+        log "Warning: Could not fetch checksum from Plex API. Proceeding without verification."
+        log "This is a security risk. Ensure you trust your network connection."
+        return 1
+    fi
+
+    echo "$checksum"
+}
+
+verify_checksum() {
+    local file=$1
+    local expected_checksum=$2
+
+    if [[ -z "$expected_checksum" ]]; then
+        log "Warning: No checksum available for verification. Skipping checksum check."
+        return 0
+    fi
+
+    log "Verifying package integrity..."
+
+    # Calculate SHA-1 checksum of downloaded file
+    local actual_checksum=$(sha1sum "$file" | awk '{print $1}')
+
+    if [[ "$actual_checksum" != "$expected_checksum" ]]; then
+        die "SECURITY ERROR: Checksum verification failed!
+Expected: $expected_checksum
+Got:      $actual_checksum
+The downloaded package may be corrupted or compromised. Aborting installation."
+    fi
+
+    log "Checksum verification passed."
+}
+
+validate_init_script() {
+    local script_path=$1
+
+    # Check if file exists
+    if [[ ! -f "$script_path" ]]; then
+        die "Init script not found: $script_path"
+    fi
+
+    # Check for invalid characters in path
+    if [[ ! "$script_path" =~ ^/[a-zA-Z0-9/_-]+$ ]]; then
+        die "Init script path contains invalid characters: $script_path"
+    fi
+
+    # Resolve symlinks to prevent symlink attacks
+    script_path="$(realpath "$script_path" 2>/dev/null)" || die "Failed to resolve init script path"
+
+    # Verify script is owned by root (UID 0)
+    local owner_uid=$(stat -c '%u' "$script_path" 2>/dev/null)
+    if [[ "$owner_uid" != "0" ]]; then
+        die "Init script must be owned by root (current owner UID: $owner_uid): $script_path"
+    fi
+
+    # Verify script is not world-writable
+    local perms=$(stat -c '%a' "$script_path" 2>/dev/null)
+    local world_writable=${perms:2:1}
+    if [[ "$world_writable" =~ [2367] ]]; then
+        die "Init script is world-writable (insecure permissions $perms): $script_path"
+    fi
+
+    echo "$script_path"
+}
+
 main() {
     AARCH="$(/bin/uname -m)"
     QPKG_NAME="PlexMediaServer"
     QPKG_CONF="/etc/config/qpkg.conf"
     REGEX_PLEX_VERSION='([0-9]+.[0-9]+.[0-9]+.[0-9]+-\b[0-9a-f]{9}\b)'
-    PLEX_DIR="$(parse_config_file $QPKG_CONF $QPKG_NAME Install_path)"
-    PLEX_INIT_SCRIPT="$(parse_config_file $QPKG_CONF $QPKG_NAME Shell)"
+    PLEX_DIR="$(parse_config_file "$QPKG_CONF" "$QPKG_NAME" Install_path)"
+    PLEX_INIT_SCRIPT="$(parse_config_file "$QPKG_CONF" "$QPKG_NAME" Shell)"
+
+    # Validate init script path before use
+    PLEX_INIT_SCRIPT="$(validate_init_script "$PLEX_INIT_SCRIPT")"
+
     PLEX_TOKEN="$(/bin/grep PlexOnlineToken "${PLEX_DIR}"/Library/Plex\ Media\ Server/Preferences.xml \
                   | sed -e 's/.*PlexOnlineToken=\"//' -e 's/\".*//')"
     # Don't exit if LOCAL_PLEX_VERSION is empty, i.e PMS is not installed or simply not running.
@@ -102,11 +192,15 @@ main() {
                           --silent \
                           http://localhost:32400/identity \
                           | /bin/grep -ioE "${REGEX_PLEX_VERSION}")" || true
+
+    # Use HTTP header for token to prevent exposure in process lists
     REMOTE_PLEX_VERSION="$(/sbin/curl \
+                           "${CURL_SECURE_OPTS[@]}" \
                            --location \
                            --head \
                            --write-out '%{url_effective}' \
-                           "https://plex.tv/downloads/latest/5?channel=${CHANNEL}&build=linux-${AARCH}&distro=qnap&X-Plex-Token=${PLEX_TOKEN}" \
+                           --header "X-Plex-Token: ${PLEX_TOKEN}" \
+                           "https://plex.tv/downloads/latest/5?channel=${CHANNEL}&build=linux-${AARCH}&distro=qnap" \
                            2>/dev/null | /usr/bin/tail -n1 | /bin/grep -ioE "${REGEX_PLEX_VERSION}" | /bin/uniq)"
 
     if [[ "${CHANNEL}" == "public" ]]; then
@@ -131,11 +225,21 @@ main() {
 
     log "Downloading Plex Media Server ${REMOTE_PLEX_VERSION}-${AARCH}..."
 
-    /sbin/curl \
-    --silent \
-    --location \
-    --output "${DOWNLOAD_DIR}"/"${QPKG_NAME}".qpkg \
-    "https://plex.tv/downloads/latest/5?channel=${CHANNEL}&build=linux-${AARCH}&distro=qnap&X-Plex-Token=${PLEX_TOKEN}"
+    # Fetch expected checksum from Plex API
+    EXPECTED_CHECKSUM="$(fetch_checksum_from_api "${AARCH}")" || EXPECTED_CHECKSUM=""
+
+    # Download package using secure curl options and HTTP header for token
+    if ! /sbin/curl \
+        "${CURL_SECURE_OPTS[@]}" \
+        --location \
+        --header "X-Plex-Token: ${PLEX_TOKEN}" \
+        --output "${DOWNLOAD_DIR}"/"${QPKG_NAME}".qpkg \
+        "https://plex.tv/downloads/latest/5?channel=${CHANNEL}&build=linux-${AARCH}&distro=qnap"; then
+        die "Failed to download Plex Media Server package from plex.tv"
+    fi
+
+    # Verify package checksum before installation
+    verify_checksum "${DOWNLOAD_DIR}/${QPKG_NAME}.qpkg" "${EXPECTED_CHECKSUM}"
 
     "${PLEX_INIT_SCRIPT}" stop
 
