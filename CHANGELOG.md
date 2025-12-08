@@ -14,6 +14,45 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Fixes
 ### Security
 
+## [1.1.0] - 08-12-2025
+
+### Security
+
+- Implemented SHA-1 checksum verification for downloaded .qpkg packages using Plex JSON API
+  - Helps prevent installation of corrupted or malicious packages
+  - Fetches checksums from `https://plex.tv/api/downloads/5.json`
+  - Installation aborts if checksum verification fails
+
+- Moved Plex authentication token from URL parameters to HTTP headers
+  - Prevents token exposure in process listings (`ps aux`)
+  - Prevents token leakage in shell history and system logs
+  - Uses `X-Plex-Token` HTTP header instead of query parameter
+
+- Enhanced HTTPS/TLS validation for all curl operations
+  - Added `--fail` flag to fail on HTTP errors
+  - Enforced HTTPS-only protocol with `--proto '=https'`
+  - Set minimum TLS version to 1.2 with `--tlsv1.2`
+  - Limited redirect chains to 3 with `--max-redirs 3`
+  - Added connection timeout (30s) and operation timeout (5min)
+  - Prevents MITM attacks and ensures proper error handling
+
+- Added comprehensive init script path validation
+  - Verifies init script exists before execution
+  - Validates path contains only safe characters
+  - Resolves symlinks to prevent symlink attacks
+  - Checks script is owned by root (prevents privilege escalation)
+  - Ensures script is not world-writable
+  - Prevents command injection via compromised config files
+
+### Changes
+
+- Quoted all variables in `parse_config_file` calls to prevent word splitting
+- Added security-focused helper functions:
+  - `fetch_checksum_from_api()`: Retrieves SHA-1 checksums from Plex API
+  - `verify_checksum()`: Validates package integrity before installation
+  - `validate_init_script()`: Ensures init script path is secure
+- Improved error messages for download and verification failures
+
 ## [1.0.1] - 24-10-2023
 
 ### Fixes

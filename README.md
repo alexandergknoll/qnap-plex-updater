@@ -39,6 +39,43 @@ $ echo "0 */6 * * * /opt/qnap-plex-updater/bin/qnap-plex-updater --channel publi
 $ crontab /etc/config/crontab && /etc/init.d/crond.sh restart
 ```
 
+#### Important Notes for Automated Updates
+
+**Security Considerations:**
+
+When running via cron or other automated methods, the script implements additional security safeguards:
+
+- **Checksum Verification**: The script will automatically abort if it cannot fetch or verify the package checksum from the Plex API. This prevents installation of potentially corrupted or compromised packages.
+- **No Interactive Prompts**: In non-interactive mode (cron, scripts), security warnings cannot be confirmed and will cause the update to abort automatically.
+
+**Monitoring Recommendations:**
+
+To ensure updates are working correctly when running via cron:
+
+1. **Check System Logs**: Review logs to identify when updates fail due to checksum verification or other security checks:
+   ```bash
+   grep "qnap-plex-updater" /var/log/messages
+   ```
+
+2. **Email Notifications**: Consider redirecting output to email instead of `/dev/null`:
+   ```bash
+   0 */6 * * * /opt/qnap-plex-updater/bin/qnap-plex-updater --channel public --notify 2>&1 | mail -s "Plex Update" admin@example.com
+   ```
+
+3. **Test Manually First**: Always test the updater manually before setting up automated runs:
+   ```bash
+   /opt/qnap-plex-updater/bin/qnap-plex-updater --channel public --notify
+   ```
+
+**Common Automated Failure Scenarios:**
+
+- **Network Issues**: Temporary connectivity problems with plex.tv
+- **API Unavailability**: Plex API may be temporarily down or rate-limited
+- **Checksum Unavailable**: New releases may not immediately have checksums published
+- **Authentication Issues**: Expired or invalid Plex authentication tokens
+
+If automated updates consistently fail, run the script manually to see detailed error messages and resolve the underlying issue.
+
 ## License:
 
 ```
