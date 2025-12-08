@@ -100,6 +100,28 @@ parse_config_file() {
     /sbin/getcfg -f "${file}" "${object}" "${key}"
 }
 
+prompt_security_warning() {
+    local message=$1
+
+    # Check if running interactively (stdin is a terminal)
+    if [[ ! -t 0 ]]; then
+        # Non-interactive mode (cron/automated) - abort for security
+        die "SECURITY: $message
+Running non-interactively (cron/automated). Aborting update for security.
+To proceed, run this script manually and confirm the security warning."
+    fi
+
+    # Interactive mode - prompt user
+    log "WARNING: $message"
+    log ""
+    read -p "Do you want to proceed anyway? (y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        die "Update aborted by user for security reasons."
+    fi
+    log "User confirmed - proceeding with update..."
+}
+
 fetch_checksum_from_api() {
     local arch=$1
     local checksum_url="https://plex.tv/api/downloads/5.json"
@@ -110,8 +132,16 @@ fetch_checksum_from_api() {
                      head -1)
 
     if [[ -z "$checksum" ]]; then
-        log "Warning: Could not fetch checksum from Plex API. Proceeding without verification."
-        log "This is a security risk. Ensure you trust your network connection."
+        prompt_security_warning "Could not fetch checksum from Plex API.
+The downloaded package cannot be verified for integrity.
+This could allow installation of corrupted or malicious packages.
+
+Possible causes:
+- Network connectivity issues
+- Plex API temporarily unavailable
+- Architecture '${arch}' not found in API response
+
+Proceeding without verification is a SECURITY RISK."
         return 1
     fi
 
@@ -123,23 +153,31 @@ verify_checksum() {
     local expected_checksum=$2
 
     if [[ -z "$expected_checksum" ]]; then
-        log "Warning: No checksum available for verification. Skipping checksum check."
+        # Checksum not available (user already confirmed in fetch_checksum_from_api)
+        log "Skipping checksum verification (user confirmed)."
         return 0
     fi
 
-    log "Verifying package integrity..."
+    log "Verifying package integrity (SHA-1 checksum)..."
 
     # Calculate SHA-1 checksum of downloaded file
     local actual_checksum=$(sha1sum "$file" | awk '{print $1}')
 
     if [[ "$actual_checksum" != "$expected_checksum" ]]; then
-        die "SECURITY ERROR: Checksum verification failed!
+        die "SECURITY ERROR: Checksum verification FAILED!
 Expected: $expected_checksum
 Got:      $actual_checksum
-The downloaded package may be corrupted or compromised. Aborting installation."
+
+The downloaded package may be corrupted or compromised.
+This could indicate:
+- Network transmission error
+- Man-in-the-middle attack
+- Compromised download source
+
+ABORTING INSTALLATION FOR SECURITY."
     fi
 
-    log "Checksum verification passed."
+    log "✓ Checksum verification passed."
 }
 
 validate_init_script() {
