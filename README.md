@@ -32,17 +32,50 @@ Plex Media Server 1.26.2.5797-5bd057d2b-x86_64 installed successfully!
 [~] #
 ```
 
+### Check for updates
+
+Use `--check` to see if an update is available without installing:
+
+```bash
+[~] # /opt/qnap-plex-updater/bin/qnap-plex-updater --check --channel beta
+Update available: 1.40.0.7775-456fbaf97 -> 1.43.0.10389-8be686aa6-x86_64
+```
+
+Exits 0 if an update is available, 1 if already up to date — useful for scripting:
+
+```bash
+if /opt/qnap-plex-updater/bin/qnap-plex-updater --check --channel public; then
+  echo "Plex update available"
+fi
+```
+
+### Force reinstall
+
+Use `--force` to reinstall even if the latest version is already installed:
+
+```bash
+[~] # /opt/qnap-plex-updater/bin/qnap-plex-updater --force --channel public
+```
+
+### Logging
+
+Use `--log` to append timestamped output to a file (useful for cron jobs):
+
+```bash
+[~] # /opt/qnap-plex-updater/bin/qnap-plex-updater --channel public --notify --log /var/log/plex-updater.log
+```
+
 ### Cron job schedule
 
 ```bash
-$ echo "0 */6 * * * /opt/qnap-plex-updater/bin/qnap-plex-updater --channel public --notify > /dev/null 2>&1" >> /etc/config/crontab
+$ echo "0 */6 * * * /opt/qnap-plex-updater/bin/qnap-plex-updater --channel public --notify --log /var/log/plex-updater.log" >> /etc/config/crontab
 $ crontab /etc/config/crontab && /etc/init.d/crond.sh restart
 ```
 
 ## License:
 
 ```
-Copyright 2022-2023 Martin Simon
+Copyright 2022-2026 Martin Simon
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.

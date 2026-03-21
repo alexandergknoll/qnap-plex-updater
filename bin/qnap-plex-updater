@@ -1,155 +1,219 @@
-#!/usr/bin/env bash
+#!/bin/sh
+#
+# qnap-plex-updater - Update Plex Media Server on QNAP NAS
+#
 
-readonly PROJECT=qnap-plex-updater
-readonly VERSION=1.0.1
+set -eu
 
-set -euo pipefail
+PROG_NAME="${0##*/}"
+VERSION="2.0.0"
 
-usage() {
-    version
-    die """
-Usage: $PROJECT [parameters] <options>...
-$PROJECT is a CLI tool written in BASH aimed at updating Plex Media Server
-on QNAP servers.
-
-PARAMETERS:
--c, --channel <channel>    Specifies Plex Media Server update channel (public/beta).
--d, --directory <path>     Specifies download directory.
-
-OPTIONS:
--h, --help       Show this help log.
--n, --notify     Output QTS/QuTS notice board notification on successful install.
--V, --verbose    Output debug information.
--v, --version    Show version information.
-
-Report bugs to https://github.com/barnumbirr/qnap-plex-updater/issues"""
-}
-
-version() {
-    log "$PROJECT $VERSION"
-}
+msg() { printf '%b\n' "$*"; }
 
 log() {
-    echo >&2 -e "${1-}"
+  printf '%b\n' "$*" >&2
+  if [ -n "${LOG_FILE}" ]; then
+    printf '%s %b\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE"
+  fi
 }
 
 die() {
-  local log=$1
-  log "$log"
-  exit 1
+  _die_rc=1
+  case "${1-}" in [0-9]*) _die_rc="$1"; shift ;; esac
+  log "$*"
+  exit "$_die_rc"
 }
 
-parse_params() {
-    CHANNEL='public'
-    DOWNLOAD_DIR=''
-    NOTIFY=0
+version() { msg "$PROG_NAME $VERSION"; }
 
-    while :; do
-        case "${1-}" in
-        -h | --help)
-            usage
-            ;;
-        -v | --version)
-            version
-            exit 1
-            ;;
-        -V | --verbose)
-            set -x
-            ;;
-        -c | --channel)
-            CHANNEL="$(echo "${2-}" | awk '{print tolower($0)}')"
-            shift
-            ;;
-        -d | --directory)
-            DOWNLOAD_DIR="${2-}"
-            shift
-            ;;
-        -n | --notify)
-            NOTIFY=1
-            ;;
-        -?*)
-            die "Unknown option: $1
-See -h/--help for more details"
-            ;;
-        *)
-            break
-            ;;
-        esac
-        shift
-    done
+usage() {
+  version
+  cat <<EOF
+Usage: $PROG_NAME [parameters] <options>
 
-    return 0
+Update Plex Media Server on QNAP NAS.
+
+Parameters:
+  -c, --channel CHANNEL   update channel: public (default) or beta
+  -d, --directory PATH    download directory
+  --log FILE              append output to FILE with timestamps
+
+Options:
+  --check                 check for updates without installing
+  --force                 reinstall even if already up to date
+  -n, --notify            send QTS/QuTS notification on successful install
+  -V, --verbose           output debug information
+  -v, --version           display version and exit
+  -h, --help              display this help message and exit
+
+Report bugs to https://github.com/barnumbirr/qnap-plex-updater/issues
+EOF
 }
 
 parse_config_file() {
-    local file=$1
-    local object=$2
-    local key=$3
-    /sbin/getcfg -f "${file}" "${object}" "${key}"
+  /sbin/getcfg -f "$1" "$2" "$3"
+}
+
+detect_plex() {
+  AARCH="$(/bin/uname -m)"
+  QPKG_NAME="PlexMediaServer"
+  QPKG_CONF="/etc/config/qpkg.conf"
+  REGEX_PLEX_VERSION='([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-\b[0-9a-f]{9}\b)'
+
+  if [ "$CHANNEL" = "public" ]; then
+    CHANNEL=0
+  elif [ "$CHANNEL" = "beta" ]; then
+    CHANNEL=1
+  else
+    die "'channel' can only be one of 'public' or 'beta', exiting..."
+  fi
+
+  PLEX_DIR="$(parse_config_file "$QPKG_CONF" "$QPKG_NAME" Install_path)"
+  PLEX_INIT_SCRIPT="$(parse_config_file "$QPKG_CONF" "$QPKG_NAME" Shell)"
+  PLEX_TOKEN="$(sed -n 's/.*PlexOnlineToken="\([^"]*\)".*/\1/p' \
+                "${PLEX_DIR}/Library/Plex Media Server/Preferences.xml")"
+
+  [ -n "${PLEX_TOKEN}" ] || die "PlexOnlineToken not found in ${PLEX_DIR}/Library/Plex Media Server/Preferences.xml"
+
+  PLEX_API_URL="https://plex.tv/downloads/latest/5?channel=${CHANNEL}&build=linux-${AARCH}&distro=qnap"
+}
+
+get_local_version() {
+  # Don't exit if LOCAL_PLEX_VERSION is empty, i.e PMS is not installed or simply not running.
+  LOCAL_PLEX_VERSION="$(/sbin/curl \
+    --silent \
+    --max-time 30 \
+    http://localhost:32400/identity \
+    | /bin/grep -ioE "${REGEX_PLEX_VERSION}")" || true
+}
+
+get_remote_version() {
+  REMOTE_PLEX_VERSION="$(/sbin/curl \
+    --location \
+    --head \
+    --max-time 30 \
+    --header "X-Plex-Token: ${PLEX_TOKEN}" \
+    --write-out '%{url_effective}' \
+    "${PLEX_API_URL}" \
+    2>/dev/null | /usr/bin/tail -n1 | /bin/grep -ioE "${REGEX_PLEX_VERSION}" | /bin/uniq)"
+
+  [ -n "${REMOTE_PLEX_VERSION}" ] || die "failed to determine latest Plex Media Server version"
+}
+
+download() {
+  if [ -z "${DOWNLOAD_DIR}" ]; then
+    DOWNLOAD_DIR="$(parse_config_file /etc/config/def_share.info SHARE_DEF defVolMP)"
+  fi
+
+  if [ "$(df -Pm "$DOWNLOAD_DIR" | awk 'NR==2 {print $4}')" -lt 150 ]; then
+    die "Not enough free space in $DOWNLOAD_DIR, exiting..."
+  fi
+
+  QPKG_FILE="${DOWNLOAD_DIR}/${QPKG_NAME}.qpkg"
+  trap 'rm -f "$QPKG_FILE"' EXIT INT TERM
+
+  log "Downloading Plex Media Server ${REMOTE_PLEX_VERSION}-${AARCH}..."
+
+  /sbin/curl \
+    --silent \
+    --fail \
+    --location \
+    --max-time 300 \
+    --header "X-Plex-Token: ${PLEX_TOKEN}" \
+    --output "$QPKG_FILE" \
+    "${PLEX_API_URL}" || die "download failed"
+
+  [ -s "$QPKG_FILE" ] || die "download produced an empty file"
+}
+
+install() {
+  "${PLEX_INIT_SCRIPT}" stop
+
+  log "Installing and restarting Plex Media Server..."
+  sh "$QPKG_FILE"
+
+  rm -f "$QPKG_FILE"
+  trap - EXIT INT TERM
+
+  log "Plex Media Server ${REMOTE_PLEX_VERSION}-${AARCH} installed successfully!"
+
+  if [ "${NOTIFY}" -eq 1 ]; then
+    /sbin/notice_log_tool -a "Plex Media Server ${REMOTE_PLEX_VERSION}-${AARCH} installed." --severity=5
+  fi
+}
+
+check() {
+  detect_plex
+  get_local_version
+  get_remote_version
+
+  if [ "${LOCAL_PLEX_VERSION:-0.0.0.0-000000000}" = "${REMOTE_PLEX_VERSION}" ]; then
+    log "Up to date: Plex Media Server ${REMOTE_PLEX_VERSION}-${AARCH}"
+    exit 1
+  fi
+
+  log "Update available: ${LOCAL_PLEX_VERSION:-none} -> ${REMOTE_PLEX_VERSION}-${AARCH}"
+  exit 0
 }
 
 main() {
-    AARCH="$(/bin/uname -m)"
-    QPKG_NAME="PlexMediaServer"
-    QPKG_CONF="/etc/config/qpkg.conf"
-    REGEX_PLEX_VERSION='([0-9]+.[0-9]+.[0-9]+.[0-9]+-\b[0-9a-f]{9}\b)'
-    PLEX_DIR="$(parse_config_file $QPKG_CONF $QPKG_NAME Install_path)"
-    PLEX_INIT_SCRIPT="$(parse_config_file $QPKG_CONF $QPKG_NAME Shell)"
-    PLEX_TOKEN="$(/bin/grep PlexOnlineToken "${PLEX_DIR}"/Library/Plex\ Media\ Server/Preferences.xml \
-                  | sed -e 's/.*PlexOnlineToken=\"//' -e 's/\".*//')"
-    # Don't exit if LOCAL_PLEX_VERSION is empty, i.e PMS is not installed or simply not running.
-    LOCAL_PLEX_VERSION="$(/sbin/curl \
-                          --silent \
-                          http://localhost:32400/identity \
-                          | /bin/grep -ioE "${REGEX_PLEX_VERSION}")" || true
-    REMOTE_PLEX_VERSION="$(/sbin/curl \
-                           --location \
-                           --head \
-                           --write-out '%{url_effective}' \
-                           "https://plex.tv/downloads/latest/5?channel=${CHANNEL}&build=linux-${AARCH}&distro=qnap&X-Plex-Token=${PLEX_TOKEN}" \
-                           2>/dev/null | /usr/bin/tail -n1 | /bin/grep -ioE "${REGEX_PLEX_VERSION}" | /bin/uniq)"
+  detect_plex
+  get_local_version
+  get_remote_version
 
-    if [[ "${CHANNEL}" == "public" ]]; then
-        CHANNEL=0
-    elif [[ "${CHANNEL}" == "beta" ]]; then
-        CHANNEL=1
-    else
-        die "'channel' can only be one of 'public' or 'beta', exiting..."
-    fi
+  if [ "${FORCE}" -eq 0 ] && [ "${LOCAL_PLEX_VERSION:-0.0.0.0-000000000}" = "${REMOTE_PLEX_VERSION}" ]; then
+    log "Latest Plex Media Server version (${REMOTE_PLEX_VERSION}-${AARCH}) already installed, exiting..."
+    exit 0
+  fi
 
-    # If PMS is not installed or simply not running, just fetch and install the latest version available.
-    # Do nothing and exit if latest version is already installed.
-    if [[ "${LOCAL_PLEX_VERSION:-0.0.0.0-000000000}" == "${REMOTE_PLEX_VERSION}" ]]; then
-        die "Latest Plex Media Server version (${REMOTE_PLEX_VERSION}-${AARCH}) already installed, exiting..."
-    fi
+  download
+  install
+}
 
-    if [[ -z "${DOWNLOAD_DIR}" ]]; then
-        DOWNLOAD_DIR="$(parse_config_file /etc/config/def_share.info SHARE_DEF defVolMP)"
-    elif [[ "$(df -Pm "$DOWNLOAD_DIR" | awk 'NR==2 {print $4}')" -lt 150 ]]; then
-        die "Not enough free space in $DOWNLOAD_DIR, exiting..."
-    fi
+parse_params() {
+  CHANNEL='public'
+  CHECK=0
+  DOWNLOAD_DIR=''
+  FORCE=0
+  LOG_FILE=''
+  NOTIFY=0
 
-    log "Downloading Plex Media Server ${REMOTE_PLEX_VERSION}-${AARCH}..."
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -h | --help)    usage; exit 0 ;;
+      -v | --version) version; exit 0 ;;
+      -V | --verbose) set -x ;;
+      -c | --channel)
+        [ "${2-}" ] || die "missing value after $1"
+        CHANNEL="$(printf '%s' "$2" | awk '{print tolower($0)}')"
+        shift
+        ;;
+      -d | --directory)
+        [ "${2-}" ] || die "missing value after $1"
+        DOWNLOAD_DIR="$2"
+        shift
+        ;;
+      --check) CHECK=1 ;;
+      --force) FORCE=1 ;;
+      --log)
+        [ "${2-}" ] || die "missing value after $1"
+        LOG_FILE="$2"
+        shift
+        ;;
+      -n | --notify) NOTIFY=1 ;;
+      -?*) die "Unknown option: $1\nSee -h/--help for more details" ;;
+      *)   break ;;
+    esac
+    shift
+  done
 
-    /sbin/curl \
-    --silent \
-    --location \
-    --output "${DOWNLOAD_DIR}"/"${QPKG_NAME}".qpkg \
-    "https://plex.tv/downloads/latest/5?channel=${CHANNEL}&build=linux-${AARCH}&distro=qnap&X-Plex-Token=${PLEX_TOKEN}"
+  [ "${CHECK}" -eq 1 ] && [ "${FORCE}" -eq 1 ] && die "--check and --force are mutually exclusive"
 
-    "${PLEX_INIT_SCRIPT}" stop
-
-    log "Installing and restarting Plex Media Server..."
-    : "$(sh "${DOWNLOAD_DIR}"/"${QPKG_NAME}".qpkg > /dev/null 2>&1)" &
-    wait $!
-
-    rm "${DOWNLOAD_DIR}"/"${QPKG_NAME}".qpkg
-    log "Plex Media Server ${REMOTE_PLEX_VERSION}-${AARCH} installed successfully!"
-
-    if [[ ${NOTIFY} -eq 1 ]]; then
-        /sbin/notice_log_tool -a "Plex Media Server ${REMOTE_PLEX_VERSION}-${AARCH} installed." --severity=5
-    fi
+  if [ "${CHECK}" -eq 1 ]; then
+    check
+  else
+    main
+  fi
 }
 
 parse_params "$@"
-main

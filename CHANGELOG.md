@@ -2,71 +2,90 @@
 
 All notable changes to this project will be documented in this file.
 
-This file format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).\
+This file format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.0] - 2026-03-21
 
-### New
-### Changes
-### Deprecated
-### Removed
-### Fixes
-### Security
+### Added
 
-## [1.0.1] - 24-10-2023
+- `--check` flag to check for updates without installing
+- `--force` flag to reinstall even if already up to date
+- `--log FILE` flag to append timestamped output to a file
+- Timeouts on all `curl` calls (30s for version checks, 300s for download)
+- Free space check for auto-detected download directory
+- Download verification via `--fail` and non-empty file check
+- Cleanup trap to remove partial downloads on failure
+- Validation for `--channel` and `--directory` option values
 
-### Fixes
+### Changed
 
-- fix default value for `${LOCAL_PLEX_VERSION}`
+- Switch from `bash` to POSIX `sh` for portability
+- Move Plex token from URL query parameter to `X-Plex-Token` request header
+- "Already installed" now exits 0 instead of 1
+- Rewrite script structure to match shell template conventions
+- Rewrite `--help` output format
+- Refactor `main()` into discrete functions (`detect_plex`, `get_local_version`, `get_remote_version`, `download`, `install`)
 
-## [1.0.0] - 30-10-2022
+### Fixed
 
-### New
+- Escape dots in version regex to match literal dots only
+- Validate channel before making API calls, not after
+- `--version` now exits 0 instead of 1
 
-- use `-n / --notify` to output QTS/QuTS notice board notification on successful install
+## [1.0.1] - 2023-10-24
 
-### Fixes
+### Fixed
 
-- set default value for `${LOCAL_PLEX_VERSION}`
+- Fix default value for `${LOCAL_PLEX_VERSION}`
 
-## [0.3.2] - 24-06-2022
+## [1.0.0] - 2022-10-30
 
-### New
+### Added
+
+- Use `-n / --notify` to output QTS/QuTS notice board notification on successful install
+
+### Fixed
+
+- Set default value for `${LOCAL_PLEX_VERSION}`
+
+## [0.3.2] - 2022-06-24
+
+### Added
 
 - Add 'Prerequisites' section to `README`
 
-### Fixes
+### Fixed
 
 - Fix path in `README` usage instructions (Closes: #2)
 - Replace BASH parameter expansion with good ol' trusty `awk` (Closes: #1)
 
-## [0.3.1] - 07-06-2022
+## [0.3.1] - 2022-06-07
 
-### Fixes
+### Fixed
 
 - Stop PMS to prevent script being killed
 
-## [0.3.0] - 06-06-2022
+## [0.3.0] - 2022-06-06
 
-### New
+### Added
 
 - Specify package download directory using `-d/--directory <path>`
 
-## [0.2.0] - 03-06-2022
+## [0.2.0] - 2022-06-03
 
-### New
+### Added
 
 - `AARCH` and `REGEX_PLEX_VERSION` variables
 
-### Changes
+### Changed
 
 - Return `$AARCH` in Plex Media Server version
 
-### Fixes
+### Fixed
 
 - Fix `[[ ]]` string comparisons
 
-## [0.1.0] - 31-05-2022
+## [0.1.0] - 2022-05-31
 
 Initial release.
