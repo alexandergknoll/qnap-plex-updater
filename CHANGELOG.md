@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 This file format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-05-05
+
+### Added
+
+- Retry transient curl failures up to 3 times (`--retry 3 --retry-delay 5`) on both the version probe and the package download
+- `--notify` now fires on install failure as well as success, so silent cron failures surface in the QTS notice board
+
+### Changed
+
+- Silence QNAP qpkg installer output by default; pass it through only when `-V/--verbose` is set
+- Route Plex token through a wrapper function that disables `set -x` for the curl call so the token does not leak into `--verbose` trace output
+- Raise download timeout from 5 minutes to 10 minutes to accommodate slow connections
+
+### Fixed
+
+- Fall back to `"$PLEX_DIR/Plex Media Server" --version` when the running Plex server is unreachable, so the up-to-date comparison works while Plex is stopped — no more spurious reinstalls or "Update available: none -> X.Y.Z" output from `--check`. The QPKG manifest can't be used because it only stores the marketing major.minor.patch and drops the build hash.
+- Suppress the failure notification on `--check`'s documented "up-to-date" exit code (1), so `--check --notify` no longer posts a false-alarm error to the QTS notice board
+- Validate that the `--log` file's parent directory exists at parse time, instead of crashing on the first `log()` call when the redirect fails
+- Avoid script abort under `set -e` when `plex.sh stop` returns non-zero (e.g. Plex not running)
+- Detect a missing Plex install up front with a clear error instead of failing later on a token read against a non-existent preferences file
+- Validate that the download directory exists before invoking `df` against it
+
 ## [2.0.0] - 2026-03-21
 
 ### Added

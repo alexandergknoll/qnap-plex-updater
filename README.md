@@ -25,10 +25,18 @@ $ chmod +x bin/qnap-plex-updater
 
 ```bash
 [~] # /opt/qnap-plex-updater/bin/qnap-plex-updater --channel public --notify
-Downloading Plex Media Server 1.26.2.5797-5bd057d2b-x86_64...
-Plex Media Server hasn't been enabled or started...
+Downloading Plex Media Server 1.43.2.10687-563d026ea-x86_64...
+Stopping Plex Media Server...
 Installing and restarting Plex Media Server...
-Plex Media Server 1.26.2.5797-5bd057d2b-x86_64 installed successfully!
+Plex Media Server 1.43.2.10687-563d026ea-x86_64 installed successfully!
+[~] #
+```
+
+When the latest version is already installed, the script exits cleanly:
+
+```bash
+[~] # /opt/qnap-plex-updater/bin/qnap-plex-updater --channel public
+Latest Plex Media Server version (1.43.2.10687-563d026ea-x86_64) already installed, exiting...
 [~] #
 ```
 
@@ -64,6 +72,16 @@ Use `--log` to append timestamped output to a file (useful for cron jobs):
 ```bash
 [~] # /opt/qnap-plex-updater/bin/qnap-plex-updater --channel public --notify --log /var/log/plex-updater.log
 ```
+
+### Verbose output
+
+Use `-V/--verbose` to enable shell tracing and pass through the QNAP qpkg installer output. By default the installer's output is suppressed for cleaner cron logs:
+
+```bash
+[~] # /opt/qnap-plex-updater/bin/qnap-plex-updater --channel beta --verbose
+```
+
+The Plex token is never included in the trace output.
 
 ### Cron job schedule
 

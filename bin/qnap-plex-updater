@@ -6,7 +6,7 @@
 set -eu
 
 PROG_NAME="${0##*/}"
-VERSION="2.0.0"
+VERSION="2.1.0"
 
 msg() { printf '%b\n' "$*"; }
 
@@ -20,8 +20,29 @@ log() {
 die() {
   _die_rc=1
   case "${1-}" in [0-9]*) _die_rc="$1"; shift ;; esac
+  _last_error="$*"
   log "$*"
   exit "$_die_rc"
+}
+
+cleanup() {
+  _exit=$?
+  if [ -n "${QPKG_FILE-}" ]; then
+    rm -f "$QPKG_FILE"
+  fi
+  if [ "$_exit" -ne 0 ] && [ "${NOTIFY:-0}" -eq 1 ]; then
+    /sbin/notice_log_tool -a \
+      "Plex Media Server update failed: ${_last_error:-exit code $_exit}" \
+      --severity=2 || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+# Run curl with the Plex token header, suppressing shell trace inside the
+# subshell so the token never appears in -V/--verbose output.
+curl_with_token() {
+  set +x
+  /sbin/curl --header "X-Plex-Token: ${PLEX_TOKEN}" "$@"
 }
 
 version() { msg "$PROG_NAME $VERSION"; }
@@ -41,7 +62,7 @@ Parameters:
 Options:
   --check                 check for updates without installing
   --force                 reinstall even if already up to date
-  -n, --notify            send QTS/QuTS notification on successful install
+  -n, --notify            send QTS/QuTS notification on install success or failure
   -V, --verbose           output debug information
   -v, --version           display version and exit
   -h, --help              display this help message and exit
@@ -70,29 +91,42 @@ detect_plex() {
 
   PLEX_DIR="$(parse_config_file "$QPKG_CONF" "$QPKG_NAME" Install_path)"
   PLEX_INIT_SCRIPT="$(parse_config_file "$QPKG_CONF" "$QPKG_NAME" Shell)"
-  PLEX_TOKEN="$(sed -n 's/.*PlexOnlineToken="\([^"]*\)".*/\1/p' \
-                "${PLEX_DIR}/Library/Plex Media Server/Preferences.xml")"
 
-  [ -n "${PLEX_TOKEN}" ] || die "PlexOnlineToken not found in ${PLEX_DIR}/Library/Plex Media Server/Preferences.xml"
+  [ -n "${PLEX_DIR}" ] || die "Plex Media Server is not installed on this device"
+
+  PLEX_PREFS="${PLEX_DIR}/Library/Plex Media Server/Preferences.xml"
+  [ -f "${PLEX_PREFS}" ] || die "Plex preferences file not found: ${PLEX_PREFS}"
+
+  PLEX_TOKEN="$(sed -n 's/.*PlexOnlineToken="\([^"]*\)".*/\1/p' "${PLEX_PREFS}")"
+
+  [ -n "${PLEX_TOKEN}" ] || die "PlexOnlineToken not found in ${PLEX_PREFS}"
 
   PLEX_API_URL="https://plex.tv/downloads/latest/5?channel=${CHANNEL}&build=linux-${AARCH}&distro=qnap"
 }
 
 get_local_version() {
-  # Don't exit if LOCAL_PLEX_VERSION is empty, i.e PMS is not installed or simply not running.
+  # Try the running server first; fall back to the binary's --version so the
+  # comparison still works when Plex is installed but stopped. (qpkg.conf
+  # only stores the marketing major.minor.patch, not the build hash.)
   LOCAL_PLEX_VERSION="$(/sbin/curl \
     --silent \
     --max-time 30 \
     http://localhost:32400/identity \
     | /bin/grep -ioE "${REGEX_PLEX_VERSION}")" || true
+
+  if [ -z "${LOCAL_PLEX_VERSION}" ]; then
+    LOCAL_PLEX_VERSION="$("${PLEX_DIR}/Plex Media Server" --version 2>/dev/null \
+      | /bin/grep -ioE "${REGEX_PLEX_VERSION}")" || true
+  fi
 }
 
 get_remote_version() {
-  REMOTE_PLEX_VERSION="$(/sbin/curl \
+  REMOTE_PLEX_VERSION="$(curl_with_token \
     --location \
     --head \
     --max-time 30 \
-    --header "X-Plex-Token: ${PLEX_TOKEN}" \
+    --retry 3 \
+    --retry-delay 5 \
     --write-out '%{url_effective}' \
     "${PLEX_API_URL}" \
     2>/dev/null | /usr/bin/tail -n1 | /bin/grep -ioE "${REGEX_PLEX_VERSION}" | /bin/uniq)"
@@ -105,21 +139,23 @@ download() {
     DOWNLOAD_DIR="$(parse_config_file /etc/config/def_share.info SHARE_DEF defVolMP)"
   fi
 
+  [ -d "${DOWNLOAD_DIR}" ] || die "download directory does not exist: ${DOWNLOAD_DIR:-<unset>}"
+
   if [ "$(df -Pm "$DOWNLOAD_DIR" | awk 'NR==2 {print $4}')" -lt 150 ]; then
     die "Not enough free space in $DOWNLOAD_DIR, exiting..."
   fi
 
   QPKG_FILE="${DOWNLOAD_DIR}/${QPKG_NAME}.qpkg"
-  trap 'rm -f "$QPKG_FILE"' EXIT INT TERM
 
   log "Downloading Plex Media Server ${REMOTE_PLEX_VERSION}-${AARCH}..."
 
-  /sbin/curl \
+  curl_with_token \
     --silent \
     --fail \
     --location \
-    --max-time 300 \
-    --header "X-Plex-Token: ${PLEX_TOKEN}" \
+    --max-time 600 \
+    --retry 3 \
+    --retry-delay 5 \
     --output "$QPKG_FILE" \
     "${PLEX_API_URL}" || die "download failed"
 
@@ -127,18 +163,21 @@ download() {
 }
 
 install() {
-  "${PLEX_INIT_SCRIPT}" stop
+  "${PLEX_INIT_SCRIPT}" stop || true
 
   log "Installing and restarting Plex Media Server..."
-  sh "$QPKG_FILE"
+  if [ "${VERBOSE}" -eq 1 ]; then
+    sh "$QPKG_FILE"
+  else
+    sh "$QPKG_FILE" >/dev/null 2>&1
+  fi
 
   rm -f "$QPKG_FILE"
-  trap - EXIT INT TERM
 
   log "Plex Media Server ${REMOTE_PLEX_VERSION}-${AARCH} installed successfully!"
 
   if [ "${NOTIFY}" -eq 1 ]; then
-    /sbin/notice_log_tool -a "Plex Media Server ${REMOTE_PLEX_VERSION}-${AARCH} installed." --severity=5
+    /sbin/notice_log_tool -a "Plex Media Server ${REMOTE_PLEX_VERSION}-${AARCH} installed." --severity=5 || true
   fi
 }
 
@@ -149,6 +188,7 @@ check() {
 
   if [ "${LOCAL_PLEX_VERSION:-0.0.0.0-000000000}" = "${REMOTE_PLEX_VERSION}" ]; then
     log "Up to date: Plex Media Server ${REMOTE_PLEX_VERSION}-${AARCH}"
+    NOTIFY=0  # exit 1 here is the documented "up-to-date" signal, not a failure
     exit 1
   fi
 
@@ -177,12 +217,13 @@ parse_params() {
   FORCE=0
   LOG_FILE=''
   NOTIFY=0
+  VERBOSE=0
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -h | --help)    usage; exit 0 ;;
       -v | --version) version; exit 0 ;;
-      -V | --verbose) set -x ;;
+      -V | --verbose) VERBOSE=1; set -x ;;
       -c | --channel)
         [ "${2-}" ] || die "missing value after $1"
         CHANNEL="$(printf '%s' "$2" | awk '{print tolower($0)}')"
@@ -197,6 +238,8 @@ parse_params() {
       --force) FORCE=1 ;;
       --log)
         [ "${2-}" ] || die "missing value after $1"
+        _log_dir="$(dirname "$2")"
+        [ -d "$_log_dir" ] || die "log directory does not exist: $_log_dir"
         LOG_FILE="$2"
         shift
         ;;
