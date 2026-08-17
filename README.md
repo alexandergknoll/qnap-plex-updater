@@ -32,6 +32,11 @@ Plex Media Server 1.43.2.10687-563d026ea-x86_64 installed successfully!
 [~] #
 ```
 
+The success message only prints after the install is verified: the installed
+version is re-read, the package must still be enabled, and the server must
+answer on `:32400` (up to 90 seconds). Anything short of that exits non-zero
+— and with `--notify`, reports a failure instead.
+
 When the latest version is already installed, the script exits cleanly:
 
 ```bash
@@ -46,7 +51,7 @@ Use `--check` to see if an update is available without installing:
 
 ```bash
 [~] # /opt/qnap-plex-updater/bin/qnap-plex-updater --check --channel beta
-Update available: 1.40.0.7775-456fbaf97 -> 1.43.0.10389-8be686aa6-x86_64
+Update available: 1.43.2.10687-563d026ea -> 1.43.3.10828-00f62d37d-x86_64
 ```
 
 Exits 0 if an update is available, 1 if already up to date — useful for scripting:
@@ -56,6 +61,21 @@ if /opt/qnap-plex-updater/bin/qnap-plex-updater --check --channel public; then
   echo "Plex update available"
 fi
 ```
+
+### Changelog link
+
+Use `--changelog` to show a link to the new version's release post in the
+[Plex Media Server forum thread](https://forums.plex.tv/t/plex-media-server/30447):
+
+```bash
+[~] # /opt/qnap-plex-updater/bin/qnap-plex-updater --check --channel beta --changelog
+Update available: 1.43.2.10687-563d026ea -> 1.43.3.10828-00f62d37d-x86_64
+Changelog: https://forums.plex.tv/t/plex-media-server/30447/710
+```
+
+Combined with `--notify`, the link is also appended to the QTS success notification.
+If the post can't be resolved (e.g. the release hasn't been announced on the forum
+yet), the link falls back to the thread itself.
 
 ### Force reinstall
 

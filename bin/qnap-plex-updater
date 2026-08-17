@@ -5,8 +5,13 @@
 
 set -eu
 
+# A stray LD_LIBRARY_PATH in the calling shell (e.g. exported for
+# nvidia-settings) is inherited all the way down to the restarted Plex
+# binary and can kill it at dynamic-link time; run with a clean loader path.
+unset LD_LIBRARY_PATH
+
 PROG_NAME="${0##*/}"
-VERSION="2.1.0"
+VERSION="2.2.0"
 
 msg() { printf '%b\n' "$*"; }
 
@@ -60,6 +65,7 @@ Parameters:
   --log FILE              append output to FILE with timestamps
 
 Options:
+  --changelog             show a link to the new version's changelog post
   --check                 check for updates without installing
   --force                 reinstall even if already up to date
   -n, --notify            send QTS/QuTS notification on install success or failure
@@ -134,6 +140,36 @@ get_remote_version() {
   [ -n "${REMOTE_PLEX_VERSION}" ] || die "failed to determine latest Plex Media Server version"
 }
 
+get_changelog_url() {
+  # Plex publishes one changelog post per release in this forum thread.
+  # Resolve the target version to its post via Discourse's search API; fall
+  # back to the bare thread URL when the search fails or the post doesn't
+  # exist yet. The forum posts version numbers without the build hash.
+  _changelog_thread="https://forums.plex.tv/t/plex-media-server/30447"
+
+  _changelog_post="$(/sbin/curl \
+    --silent \
+    --max-time 30 \
+    "https://forums.plex.tv/search.json?q=${REMOTE_PLEX_VERSION%%-*}%20topic%3A30447" \
+    2>/dev/null | /bin/grep -oE '"post_number":[0-9]+' | sed -n '1s/[^0-9]*//p')" || true
+
+  if [ -n "${_changelog_post}" ]; then
+    CHANGELOG_URL="${_changelog_thread}/${_changelog_post}"
+  else
+    CHANGELOG_URL="${_changelog_thread}"
+  fi
+}
+
+log_changelog() {
+  [ "${CHANGELOG}" -eq 1 ] || return 0
+  get_changelog_url
+  log "Changelog: ${CHANGELOG_URL}"
+}
+
+server_alive() {
+  /sbin/curl --silent --max-time 5 http://localhost:32400/identity >/dev/null 2>&1
+}
+
 download() {
   if [ -z "${DOWNLOAD_DIR}" ]; then
     DOWNLOAD_DIR="$(parse_config_file /etc/config/def_share.info SHARE_DEF defVolMP)"
@@ -163,21 +199,64 @@ download() {
 }
 
 install() {
-  "${PLEX_INIT_SCRIPT}" stop || true
+  # plex.sh stop SIGKILLs leftover PMS processes when its graceful shutdown
+  # times out — a known corruption hazard for the databases. We can't
+  # prevent it (the timeout is internal to plex.sh), only flag it.
+  _stop_output="$("${PLEX_INIT_SCRIPT}" stop 2>&1)" || true
+  [ -z "${_stop_output}" ] || printf '%s\n' "${_stop_output}"
+  case "${_stop_output}" in
+    *"Terminating residual service processes"*)
+      log "Warning: Plex did not stop gracefully and was force-killed; check library health if problems follow"
+      ;;
+  esac
 
   log "Installing and restarting Plex Media Server..."
+  # The qpkg wrapper exits 10 on success by design (QDK: 10 = remove the
+  # package file after install, 0 = keep it) and still exits 10 when the
+  # inner qinstall.sh fails, so the exit status can't confirm success —
+  # capture it for diagnostics and verify the outcome directly below.
+  _install_rc=0
   if [ "${VERBOSE}" -eq 1 ]; then
-    sh "$QPKG_FILE"
+    sh "$QPKG_FILE" || _install_rc=$?
   else
-    sh "$QPKG_FILE" >/dev/null 2>&1
+    sh "$QPKG_FILE" >/dev/null 2>&1 || _install_rc=$?
   fi
 
   rm -f "$QPKG_FILE"
 
+  if [ "${_install_rc}" -ne 10 ] && [ "${_install_rc}" -ne 0 ]; then
+    log "qpkg installer exited ${_install_rc}, verifying installed version..."
+  fi
+
+  get_local_version
+  if [ "${LOCAL_PLEX_VERSION:-}" != "${REMOTE_PLEX_VERSION}" ]; then
+    die "install failed: qpkg installer exited ${_install_rc}," \
+      "installed version is ${LOCAL_PLEX_VERSION:-unknown} (expected ${REMOTE_PLEX_VERSION})"
+  fi
+
+  # qinstall.sh silently disables the package when its post-install service
+  # start fails (start_service || disable_qpkg) — the wrapper still exits 10.
+  if [ "$(parse_config_file "$QPKG_CONF" "$QPKG_NAME" Enable)" != "TRUE" ]; then
+    die "install failed: ${QPKG_NAME} is disabled in ${QPKG_CONF} (the installer's service start failed)"
+  fi
+
+  # No exit status in the install chain reports whether the restarted server
+  # actually survived, so wait until it answers before claiming success.
+  _waited=0
+  until server_alive; do
+    [ "${_waited}" -lt 90 ] || die "install failed: server not answering on http://localhost:32400 after ${_waited}s"
+    sleep 5
+    _waited=$((_waited + 5))
+  done
+
   log "Plex Media Server ${REMOTE_PLEX_VERSION}-${AARCH} installed successfully!"
 
   if [ "${NOTIFY}" -eq 1 ]; then
-    /sbin/notice_log_tool -a "Plex Media Server ${REMOTE_PLEX_VERSION}-${AARCH} installed." --severity=5 || true
+    _notify_msg="Plex Media Server ${REMOTE_PLEX_VERSION}-${AARCH} installed."
+    if [ "${CHANGELOG}" -eq 1 ]; then
+      _notify_msg="${_notify_msg} Changelog: ${CHANGELOG_URL}"
+    fi
+    /sbin/notice_log_tool -a "$_notify_msg" --severity=5 || true
   fi
 }
 
@@ -193,6 +272,7 @@ check() {
   fi
 
   log "Update available: ${LOCAL_PLEX_VERSION:-none} -> ${REMOTE_PLEX_VERSION}-${AARCH}"
+  log_changelog
   exit 0
 }
 
@@ -206,11 +286,14 @@ main() {
     exit 0
   fi
 
+  log_changelog
+
   download
   install
 }
 
 parse_params() {
+  CHANGELOG=0
   CHANNEL='public'
   CHECK=0
   DOWNLOAD_DIR=''
@@ -234,6 +317,7 @@ parse_params() {
         DOWNLOAD_DIR="$2"
         shift
         ;;
+      --changelog) CHANGELOG=1 ;;
       --check) CHECK=1 ;;
       --force) FORCE=1 ;;
       --log)

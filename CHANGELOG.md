@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 This file format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-08-17
+
+### Added
+
+- `--changelog` flag: log a link to the new version's changelog post on [forums.plex.tv](https://forums.plex.tv/t/plex-media-server/30447) when an update is found or installed; with `--notify`, the link is appended to the QTS success notification
+- Warn when Plex has to be force-killed during the stop phase (a known database-corruption hazard)
+
+### Fixed
+
+- Install success is now verified instead of inferred: the installed version is re-read, the package's `Enable` flag is checked (the installer silently disables Plex when its post-install service start fails), and the server must answer on `:32400` (up to 90s) before success is reported. The qpkg installer exits 10 on success by design, which since v2.0.0 silently killed the script before the success message — and with `--notify`, sent a false failure notification for successful installs
+- `LD_LIBRARY_PATH` is unset at startup, so a stray export in the calling shell can no longer crash the freshly restarted server
+
 ## [2.1.0] - 2026-05-05
 
 ### Added
