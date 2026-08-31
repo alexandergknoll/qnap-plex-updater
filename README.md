@@ -4,13 +4,18 @@ Shell script aimed at updating Plex Media Server on QNAP servers.
 
 ## Prerequisites:
 
-- Entware [installed on your device](https://github.com/Entware/entware/wiki/Install-on-QNAP-NAS)
-- `git` installed
+None beyond what QTS/QuTS ships. The script is POSIX `sh` and calls only
+QNAP's own tools (`getcfg`, `curl`, `notice_log_tool`) and busybox applets.
 
+Entware is needed by the installation method below, not by the script: for
+`git`, and to make `/opt` persistent. On QTS the root filesystem is a RAM
+disk, so a checkout in `/opt` does not survive a reboot unless Entware backs
+it with storage. To skip it, see [Without Entware](#without-entware).
 
 ## Installation
 
-Clone the repository:
+With [Entware](https://github.com/Entware/entware/wiki/Install-on-QNAP-NAS)
+installed, clone the repository:
 
 ```bash
 $ cd /opt/
@@ -18,6 +23,23 @@ $ git clone https://github.com/barnumbirr/qnap-plex-updater.git
 $ cd qnap-plex-updater
 $ chmod +x bin/qnap-plex-updater
 ```
+
+Update it with `git -C /opt/qnap-plex-updater pull`.
+
+### Without Entware
+
+The script is a single file, so copy it onto a share, which survives reboots
+as `/opt` on its own does not:
+
+```bash
+$ mkdir -p /share/Public/qnap-plex-updater
+$ /sbin/curl -o /share/Public/qnap-plex-updater/qnap-plex-updater \
+    https://raw.githubusercontent.com/barnumbirr/qnap-plex-updater/master/bin/qnap-plex-updater
+$ chmod +x /share/Public/qnap-plex-updater/qnap-plex-updater
+```
+
+Adjust the paths in the examples below to match, and update by re-running the
+`curl`.
 
 ## Usage
 
