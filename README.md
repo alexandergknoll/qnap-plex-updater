@@ -4,13 +4,18 @@ Shell script aimed at updating Plex Media Server on QNAP servers.
 
 ## Prerequisites:
 
-- Entware [installed on your device](https://github.com/Entware/entware/wiki/Install-on-QNAP-NAS)
-- `git` installed
+None beyond what QTS/QuTS ships. The script is POSIX `sh` and calls only
+QNAP's own tools (`getcfg`, `curl`, `notice_log_tool`) and busybox applets.
 
+Entware is needed by the installation method below, not by the script: for
+`git`, and to make `/opt` persistent. On QTS the root filesystem is a RAM
+disk, so a checkout in `/opt` does not survive a reboot unless Entware backs
+it with storage. To skip it, see [Without Entware](#without-entware).
 
 ## Installation
 
-Clone the repository:
+With [Entware](https://github.com/Entware/entware/wiki/Install-on-QNAP-NAS)
+installed, clone the repository:
 
 ```bash
 $ cd /opt/
@@ -19,23 +24,111 @@ $ cd qnap-plex-updater
 $ chmod +x bin/qnap-plex-updater
 ```
 
+Update it with `git -C /opt/qnap-plex-updater pull`.
+
+### Without Entware
+
+The script is a single file, so copy it onto a share, which survives reboots
+as `/opt` on its own does not:
+
+```bash
+$ mkdir -p /share/Public/qnap-plex-updater
+$ /sbin/curl -o /share/Public/qnap-plex-updater/qnap-plex-updater \
+    https://raw.githubusercontent.com/barnumbirr/qnap-plex-updater/master/bin/qnap-plex-updater
+$ chmod +x /share/Public/qnap-plex-updater/qnap-plex-updater
+```
+
+Adjust the paths in the examples below to match, and update by re-running the
+`curl`.
+
 ## Usage
 
 ### Manual
 
 ```bash
 [~] # /opt/qnap-plex-updater/bin/qnap-plex-updater --channel public --notify
-Downloading Plex Media Server 1.26.2.5797-5bd057d2b-x86_64...
-Plex Media Server hasn't been enabled or started...
+Downloading Plex Media Server 1.43.2.10687-563d026ea-x86_64...
+Stopping Plex Media Server...
 Installing and restarting Plex Media Server...
-Plex Media Server 1.26.2.5797-5bd057d2b-x86_64 installed successfully!
+Plex Media Server 1.43.2.10687-563d026ea-x86_64 installed successfully!
 [~] #
 ```
+
+The success message only prints after the install is verified: the installed
+version is re-read, the package must still be enabled, and the server must
+answer on `:32400` (up to 90 seconds). Anything short of that exits non-zero
+— and with `--notify`, reports a failure instead.
+
+When the latest version is already installed, the script exits cleanly:
+
+```bash
+[~] # /opt/qnap-plex-updater/bin/qnap-plex-updater --channel public
+Latest Plex Media Server version (1.43.2.10687-563d026ea-x86_64) already installed, exiting...
+[~] #
+```
+
+### Check for updates
+
+Use `--check` to see if an update is available without installing:
+
+```bash
+[~] # /opt/qnap-plex-updater/bin/qnap-plex-updater --check --channel beta
+Update available: 1.43.2.10687-563d026ea -> 1.43.3.10828-00f62d37d-x86_64
+```
+
+Exits 0 if an update is available, 1 if already up to date — useful for scripting:
+
+```bash
+if /opt/qnap-plex-updater/bin/qnap-plex-updater --check --channel public; then
+  echo "Plex update available"
+fi
+```
+
+### Changelog link
+
+Use `--changelog` to show a link to the new version's release post in the
+[Plex Media Server forum thread](https://forums.plex.tv/t/plex-media-server/30447):
+
+```bash
+[~] # /opt/qnap-plex-updater/bin/qnap-plex-updater --check --channel beta --changelog
+Update available: 1.43.2.10687-563d026ea -> 1.43.3.10828-00f62d37d-x86_64
+Changelog: https://forums.plex.tv/t/plex-media-server/30447/710
+```
+
+Combined with `--notify`, the link is also appended to the QTS success notification.
+If the post can't be resolved (e.g. the release hasn't been announced on the forum
+yet), the link falls back to the thread itself.
+
+### Force reinstall
+
+Use `--force` to reinstall even if the latest version is already installed:
+
+```bash
+[~] # /opt/qnap-plex-updater/bin/qnap-plex-updater --force --channel public
+```
+
+### Logging
+
+Use `--log` to append timestamped output to a file (useful for cron jobs):
+
+```bash
+[~] # /opt/qnap-plex-updater/bin/qnap-plex-updater --channel public --notify --log /var/log/plex-updater.log
+```
+
+### Verbose output
+
+Use `-V/--verbose` to enable shell tracing and pass through the QNAP qpkg installer output. By default the installer's output is suppressed for cleaner cron logs:
+
+```bash
+[~] # /opt/qnap-plex-updater/bin/qnap-plex-updater --channel beta --verbose
+```
+
+The Plex token is never included in the trace output.
 
 ### Cron job schedule
 
 ```bash
-$ echo "0 */6 * * * /opt/qnap-plex-updater/bin/qnap-plex-updater --channel public --notify > /dev/null 2>&1" >> /etc/config/crontab
+$ echo "0 */6 * * * /opt/qnap-plex-updater/bin/qnap-plex-updater --channel public --notify --log /var/log/plex-updater.log" >> /etc/config/crontab
 $ crontab /etc/config/crontab && /etc/init.d/crond.sh restart
 ```
 
@@ -79,7 +172,7 @@ If automated updates consistently fail, run the script manually to see detailed 
 ## License:
 
 ```
-Copyright 2022-2023 Martin Simon
+Copyright 2022-2026 Martin Simon
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.

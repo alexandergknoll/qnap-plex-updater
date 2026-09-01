@@ -2,110 +2,132 @@
 
 All notable changes to this project will be documented in this file.
 
-This file format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).\
+This file format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### New
-### Changes
-### Deprecated
-### Removed
-### Fixes
-### Security
-
-## [1.1.0] - 08-12-2025
+## [2.3.0] - 2026-09-01
 
 ### Security
 
-- Implemented SHA-1 checksum verification for downloaded .qpkg packages using Plex JSON API
-  - Helps prevent installation of corrupted or malicious packages
-  - Fetches checksums from `https://plex.tv/api/downloads/5.json`
-  - Installation aborts if checksum verification fails
+- Implemented SHA-1 checksum verification for downloaded .qpkg packages using the Plex JSON API (`https://plex.tv/api/downloads/5.json`); if the checksum can't be fetched, the script prompts for confirmation interactively and aborts automatically when run non-interactively (cron)
+- Enforced HTTPS-only, TLS 1.2 minimum, and a 3-redirect cap on all outbound curl requests
+- Added init script path validation before execution: existence, path traversal, a safe-character allowlist, symlink resolution, root ownership, and world-writable checks
 
-- Moved Plex authentication token from URL parameters to HTTP headers
-  - Prevents token exposure in process listings (`ps aux`)
-  - Prevents token leakage in shell history and system logs
-  - Uses `X-Plex-Token` HTTP header instead of query parameter
+## [2.2.0] - 2026-08-17
 
-- Enhanced HTTPS/TLS validation for all curl operations
-  - Added `--fail` flag to fail on HTTP errors
-  - Enforced HTTPS-only protocol with `--proto '=https'`
-  - Set minimum TLS version to 1.2 with `--tlsv1.2`
-  - Limited redirect chains to 3 with `--max-redirs 3`
-  - Added connection timeout (30s) and operation timeout (5min)
-  - Prevents MITM attacks and ensures proper error handling
+### Added
 
-- Added comprehensive init script path validation
-  - Verifies init script exists before execution
-  - Validates path contains only safe characters
-  - Resolves symlinks to prevent symlink attacks
-  - Checks script is owned by root (prevents privilege escalation)
-  - Ensures script is not world-writable
-  - Prevents command injection via compromised config files
+- `--changelog` flag: log a link to the new version's changelog post on [forums.plex.tv](https://forums.plex.tv/t/plex-media-server/30447) when an update is found or installed; with `--notify`, the link is appended to the QTS success notification
+- Warn when Plex has to be force-killed during the stop phase (a known database-corruption hazard)
 
-### Changes
+### Fixed
 
-- Quoted all variables in `parse_config_file` calls to prevent word splitting
-- Added security-focused helper functions:
-  - `fetch_checksum_from_api()`: Retrieves SHA-1 checksums from Plex API
-  - `verify_checksum()`: Validates package integrity before installation
-  - `validate_init_script()`: Ensures init script path is secure
-- Improved error messages for download and verification failures
+- Install success is now verified instead of inferred: the installed version is re-read, the package's `Enable` flag is checked (the installer silently disables Plex when its post-install service start fails), and the server must answer on `:32400` (up to 90s) before success is reported. The qpkg installer exits 10 on success by design, which since v2.0.0 silently killed the script before the success message — and with `--notify`, sent a false failure notification for successful installs
+- `LD_LIBRARY_PATH` is unset at startup, so a stray export in the calling shell can no longer crash the freshly restarted server
 
-## [1.0.1] - 24-10-2023
+## [2.1.0] - 2026-05-05
 
-### Fixes
+### Added
 
-- fix default value for `${LOCAL_PLEX_VERSION}`
+- Retry transient curl failures up to 3 times (`--retry 3 --retry-delay 5`) on both the version probe and the package download
+- `--notify` now fires on install failure as well as success, so silent cron failures surface in the QTS notice board
 
-## [1.0.0] - 30-10-2022
+### Changed
 
-### New
+- Silence QNAP qpkg installer output by default; pass it through only when `-V/--verbose` is set
+- Route Plex token through a wrapper function that disables `set -x` for the curl call so the token does not leak into `--verbose` trace output
+- Raise download timeout from 5 minutes to 10 minutes to accommodate slow connections
 
-- use `-n / --notify` to output QTS/QuTS notice board notification on successful install
+### Fixed
 
-### Fixes
+- Fall back to `"$PLEX_DIR/Plex Media Server" --version` when the running Plex server is unreachable, so the up-to-date comparison works while Plex is stopped — no more spurious reinstalls or "Update available: none -> X.Y.Z" output from `--check`. The QPKG manifest can't be used because it only stores the marketing major.minor.patch and drops the build hash.
+- Suppress the failure notification on `--check`'s documented "up-to-date" exit code (1), so `--check --notify` no longer posts a false-alarm error to the QTS notice board
+- Validate that the `--log` file's parent directory exists at parse time, instead of crashing on the first `log()` call when the redirect fails
+- Avoid script abort under `set -e` when `plex.sh stop` returns non-zero (e.g. Plex not running)
+- Detect a missing Plex install up front with a clear error instead of failing later on a token read against a non-existent preferences file
+- Validate that the download directory exists before invoking `df` against it
 
-- set default value for `${LOCAL_PLEX_VERSION}`
+## [2.0.0] - 2026-03-21
 
-## [0.3.2] - 24-06-2022
+### Added
 
-### New
+- `--check` flag to check for updates without installing
+- `--force` flag to reinstall even if already up to date
+- `--log FILE` flag to append timestamped output to a file
+- Timeouts on all `curl` calls (30s for version checks, 300s for download)
+- Free space check for auto-detected download directory
+- Download verification via `--fail` and non-empty file check
+- Cleanup trap to remove partial downloads on failure
+- Validation for `--channel` and `--directory` option values
+
+### Changed
+
+- Switch from `bash` to POSIX `sh` for portability
+- Move Plex token from URL query parameter to `X-Plex-Token` request header
+- "Already installed" now exits 0 instead of 1
+- Rewrite script structure to match shell template conventions
+- Rewrite `--help` output format
+- Refactor `main()` into discrete functions (`detect_plex`, `get_local_version`, `get_remote_version`, `download`, `install`)
+
+### Fixed
+
+- Escape dots in version regex to match literal dots only
+- Validate channel before making API calls, not after
+- `--version` now exits 0 instead of 1
+
+## [1.0.1] - 2023-10-24
+
+### Fixed
+
+- Fix default value for `${LOCAL_PLEX_VERSION}`
+
+## [1.0.0] - 2022-10-30
+
+### Added
+
+- Use `-n / --notify` to output QTS/QuTS notice board notification on successful install
+
+### Fixed
+
+- Set default value for `${LOCAL_PLEX_VERSION}`
+
+## [0.3.2] - 2022-06-24
+
+### Added
 
 - Add 'Prerequisites' section to `README`
 
-### Fixes
+### Fixed
 
 - Fix path in `README` usage instructions (Closes: #2)
 - Replace BASH parameter expansion with good ol' trusty `awk` (Closes: #1)
 
-## [0.3.1] - 07-06-2022
+## [0.3.1] - 2022-06-07
 
-### Fixes
+### Fixed
 
 - Stop PMS to prevent script being killed
 
-## [0.3.0] - 06-06-2022
+## [0.3.0] - 2022-06-06
 
-### New
+### Added
 
 - Specify package download directory using `-d/--directory <path>`
 
-## [0.2.0] - 03-06-2022
+## [0.2.0] - 2022-06-03
 
-### New
+### Added
 
 - `AARCH` and `REGEX_PLEX_VERSION` variables
 
-### Changes
+### Changed
 
 - Return `$AARCH` in Plex Media Server version
 
-### Fixes
+### Fixed
 
 - Fix `[[ ]]` string comparisons
 
-## [0.1.0] - 31-05-2022
+## [0.1.0] - 2022-05-31
 
 Initial release.
